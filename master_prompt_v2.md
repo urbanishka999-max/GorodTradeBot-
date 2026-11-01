@@ -66,3 +66,4 @@ JSON: {"direction": "CALL/PUT/WAIT", "confidence": 55-75, "market_type": "OTC/RE
 
 === БАЗЫ ЗНАНИЙ ===
 Работай только с правилами из JSON. Не выдумывай. Если нет паттерна - честно WAIT.
+
