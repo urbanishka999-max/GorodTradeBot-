@@ -7,7 +7,7 @@ import pandas as pd
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
-# === Render Port Fix (чтобы Render не усыплял бота) ===
+# === 1. Render Keep-Alive Server (чтобы Render не усыплял бота) ===
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -23,23 +23,24 @@ def run_server():
     port = int(os.getenv("PORT", 10000))
     try:
         server = HTTPServer(('0.0.0.0', port), Handler)
-        print(f"Dummy web server started on port {port}")
+        print(f"Dummy web server started on port {port}", flush=True)
         server.serve_forever()
     except Exception as e:
-        print(f"Server error: {e}")
+        print(f"Server error: {e}", flush=True)
 
 threading.Thread(target=run_server, daemon=True).start()
 
 print("=== GorodTradeBot v5 FOREX REAL ===", flush=True)
 
+# === 2. Проверка ключей ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 TWELVE_KEY = os.getenv("TWELVE_KEY")
 
 if not BOT_TOKEN:
-    raise Exception("BOT_TOKEN missing!")
+    raise Exception("BOT_TOKEN missing! Add to Render Environment.")
 if not GEMINI_KEY:
-    raise Exception("GEMINI_KEY missing!")
+    raise Exception("GEMINI_KEY missing! Add to Render Environment.")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -55,27 +56,64 @@ def get_main_keyboard():
     )
     return markup
 
+# === 3. Инициализация Gemini с надежным фоллбэком ===
 try:
     from google import genai
     from google.genai import types
     client = genai.Client(api_key=GEMINI_KEY)
-    print("Gemini SDK ready")
+    print("Gemini SDK ready", flush=True)
     USE_NEW_SDK = True
 except Exception as e:
-    print(f"Gemini failed: {e}")
+    print(f"Gemini SDK init failed: {e}", flush=True)
     USE_NEW_SDK = False
 
-# Встроенный промпт (больше не зависит от внешних файлов!)
+def ask_gemini(prompt: str, image_bytes: bytes = None):
+    """Умная функция: пробует несколько моделей, если одна выдает ошибку"""
+    if not USE_NEW_SDK:
+        return "Ошибка: Gemini SDK не загружен."
+    
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-2.0-flash-lite', 'gemini-1.5-pro']
+    last_error = None
+    
+    for model_name in models_to_try:
+        try:
+            if image_bytes:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+                        prompt
+                    ]
+                )
+            else:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[prompt]
+                )
+            print(f"Success with model: {model_name}", flush=True)
+            return response.text
+        except Exception as e:
+            last_error = e
+            continue
+            
+    return f"Все модели Gemini недоступны. Последняя ошибка: {last_error}"
+
+# === 4. Встроенный промпт (никаких внешних файлов!) ===
 MASTER_PROMPT = """
-Ты профессиональный скальпер бинарных опционов. 
-Анализируй график и индикаторы. 
-Дай четкий сигнал: CALL (вверх) или PUT (вниз) или WAIT (ждать).
-Укажи уверенность в процентах (55-75%) и время экспирации (3-5 минут).
-Будь краток и используй эмодзи.
+Ты профессиональный скальпер бинарных опционов Pocket Option.
+Твоя задача: проанализировать данные и дать четкий, краткий сигнал.
+Правила:
+1. Если RSI > 70 и цена выше верхней линии Bollinger -> сигнал PUT (отскок вниз).
+2. Если RSI < 30 и цена ниже нижней линии Bollinger -> сигнал CALL (отскок вверх).
+3. Если цена внутри канала и RSI нейтральный -> сигнал WAIT (ждать).
+4. Укажи рекомендуемое время экспирации: 3-5 минут.
+5. Укажи уверенность в процентах (строго 55-75%).
+6. Будь краток, используй эмодзи, не пиши воду.
 """
 
 user_mode = {}
 
+# === 5. Обработчики команд ===
 @bot.message_handler(commands=['start','otc','real','help','eurusd','gbpusd'])
 def handle_commands(message):
     txt = message.text.lower()
@@ -89,23 +127,32 @@ def handle_commands(message):
     
     if 'otc' in txt:
         user_mode[message.chat.id] = 'OTC'
-        bot.send_message(message.chat.id, "📉 OTC режим - кидай скрин!", reply_markup=get_main_keyboard())
+        bot.send_message(message.chat.id, "📉 OTC режим активирован. Кидай скриншот графика!", reply_markup=get_main_keyboard())
     elif 'real' in txt:
         user_mode[message.chat.id] = 'REAL'
-        bot.send_message(message.chat.id, "📈 REAL режим - жми /eurusd или /gbpusd для мгновенного LIVE сигнала!", reply_markup=get_main_keyboard())
+        bot.send_message(message.chat.id, "📈 REAL режим активирован. Используй /eurusd или /gbpusd для мгновенного LIVE сигнала!", reply_markup=get_main_keyboard())
     else:
         user_mode[message.chat.id] = 'REAL'
-        bot.send_message(message.chat.id, "🤖 GorodTradeBot v5 FOREX готов!\n\n🚀 LIVE команды (без скринов, 2 сек):\n/eurusd - EUR/USD REAL\n/gbpusd - GBP/USD REAL\n\n📸 Фото-режим: просто кидай скрин графика!", reply_markup=get_main_keyboard())
+        bot.send_message(
+            message.chat.id, 
+            "🤖 GorodTradeBot v5 FOREX готов!\n\n"
+            "🚀 LIVE команды (мгновенный анализ без скринов):\n"
+            "/eurusd - EUR/USD REAL\n"
+            "/gbpusd - GBP/USD REAL\n\n"
+            "📸 Фото-режим: просто отправь скриншот графика в чат!", 
+            reply_markup=get_main_keyboard()
+        )
 
+# === 6. LIVE Режим (TwelveData) ===
 def handle_forex_live(message, symbol):
     if not TWELVE_KEY:
-        bot.send_message(message.chat.id, "❌ TWELVE_KEY не настроен в Render Environment!", reply_markup=get_main_keyboard())
+        bot.send_message(message.chat.id, "❌ Ошибка: TWELVE_KEY не найден в настройках Render!", reply_markup=get_main_keyboard())
         return
     
-    bot.send_message(message.chat.id, f"⏳ Тяну LIVE свечи {symbol} M1 с TwelveData...", reply_markup=get_main_keyboard())
+    bot.send_message(message.chat.id, f"⏳ Загружаю LIVE свечи {symbol} M1...", reply_markup=get_main_keyboard())
     
     try:
-        url = f"https://api.twelvedata.com/time_series"
+        url = "https://api.twelvedata.com/time_series"
         params = {
             "symbol": symbol,
             "interval": "1min",
@@ -117,15 +164,15 @@ def handle_forex_live(message, symbol):
         data = resp.json()
         
         if "values" not in data:
-            raise Exception(f"TwelveData error: {data.get('message', 'Unknown')}")
+            raise Exception(f"TwelveData вернул ошибку: {data.get('message', 'Unknown')}")
         
-        # TwelveData отдает новые свечи первыми, переворачиваем
+        # TwelveData отдает свежие свечи первыми, переворачиваем список
         candles = list(reversed(data["values"]))
         closes = [float(c["close"]) for c in candles]
         
         current_price = closes[-1]
         
-        # Расчет RSI 7
+        # Расчет RSI (период 7)
         deltas = pd.Series(closes).diff()
         gains = deltas.where(deltas > 0, 0)
         losses = -deltas.where(deltas < 0, 0)
@@ -134,9 +181,15 @@ def handle_forex_live(message, symbol):
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         rsi_val = rsi.iloc[-1]
-        rsi_signal = "перекуплен 🔴" if rsi_val > 70 else "перепродан 🟢" if rsi_val < 30 else "нейтрально ⚪"
         
-        # Расчет Bollinger 20/2.0
+        if rsi_val > 70:
+            rsi_signal = "перекуплен 🔴"
+        elif rsi_val < 30:
+            rsi_signal = "перепродан 🟢"
+        else:
+            rsi_signal = "нейтрально ⚪"
+        
+        # Расчет Bollinger Bands (период 20, отклонение 2.0)
         series = pd.Series(closes)
         sma = series.rolling(20).mean().iloc[-1]
         std_dev = series.rolling(20).std().iloc[-1]
@@ -162,56 +215,46 @@ def handle_forex_live(message, symbol):
         
         prompt = f"""{MASTER_PROMPT}
 
-LIVE ДАННЫЕ REAL ФОРЕКС:
+АКТУАЛЬНЫЕ LIVE ДАННЫЕ:
 {json.dumps(live_json, ensure_ascii=False, indent=2)}
 
-ЗАДАЧА: Дай сигнал CALL/PUT/WAIT на 3-4 минуты на основе RSI и Bollinger.
-Если RSI>70 и цена выше верхней границы -> PUT (отскок)
-Если RSI<30 и цена ниже нижней границы -> CALL (отскок)
-Коротко и по делу.
-"""
+Дай сигнал CALL/PUT/WAIT на 3-4 минуты. Коротко и по делу."""
         
-        text = None
-        if USE_NEW_SDK:
-            response = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=[prompt]
-            )
-            text = response.text
+        text = ask_gemini(prompt)
         
-        header = f"📊 LIVE {symbol} REAL (TwelveData)\n⏱️ Цена: {current_price}\n📈 RSI 7: {rsi_val:.1f} ({rsi_signal})\n📉 Bollinger: {bb_pos}\n\n"
+        header = (
+            f"📊 LIVE {symbol} REAL (TwelveData)\n"
+            f"⏱️ Цена: {current_price}\n"
+            f"📈 RSI 7: {rsi_val:.1f} ({rsi_signal})\n"
+            f"📉 Bollinger: {bb_pos}\n\n"
+        )
         bot.send_message(message.chat.id, header + text, reply_markup=get_main_keyboard())
         
     except Exception as e:
-        print(f"LIVE error {symbol}: {e}")
-        bot.send_message(message.chat.id, f"❌ LIVE ошибка {symbol}: {e}\n\nПроверь TWELVE_KEY в Render.", reply_markup=get_main_keyboard())
+        print(f"LIVE error {symbol}: {e}", flush=True)
+        bot.send_message(message.chat.id, f"❌ Ошибка LIVE {symbol}: {e}\n\nПроверь ключ TWELVE_KEY в Render.", reply_markup=get_main_keyboard())
 
+# === 7. PHOTO Режим (Анализ скриншотов) ===
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     mode = user_mode.get(message.chat.id, 'REAL')
-    bot.send_message(message.chat.id, f"⏳ Анализирую скрин ({mode})...", reply_markup=get_main_keyboard())
+    bot.send_message(message.chat.id, f"⏳ Анализирую скриншот ({mode})...", reply_markup=get_main_keyboard())
     try:
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded = bot.download_file(file_info.file_path)
         
-        prompt = f"{MASTER_PROMPT}\nПроанализируй этот скриншот графика Pocket Option и дай сигнал."
-        text = None
+        prompt = f"{MASTER_PROMPT}\n\nПроанализируй этот скриншот графика и дай четкий сигнал."
+        text = ask_gemini(prompt, image_bytes=downloaded)
         
-        if USE_NEW_SDK:
-            response = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=[types.Part.from_bytes(data=downloaded, mime_type='image/jpeg'), prompt]
-            )
-            text = response.text
-            
-        if text:
+        if text and not text.startswith("Ошибка"):
             bot.send_message(message.chat.id, text, reply_markup=get_main_keyboard())
         else:
-            bot.send_message(message.chat.id, "❌ Не удалось получить ответ от Gemini", reply_markup=get_main_keyboard())
+            bot.send_message(message.chat.id, f"❌ Не удалось получить ответ от AI: {text}", reply_markup=get_main_keyboard())
             
     except Exception as e:
-        print(f"Photo error: {e}")
-        bot.send_message(message.chat.id, f"❌ Ошибка анализа фото: {e}", reply_markup=get_main_keyboard())
+        print(f"Photo error: {e}", flush=True)
+        bot.send_message(message.chat.id, f"❌ Ошибка обработки фото: {e}", reply_markup=get_main_keyboard())
 
-print("Starting polling v5...")
+# === 8. Запуск ===
+print("Starting polling v5...", flush=True)
 bot.infinity_polling()
