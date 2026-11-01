@@ -1,8 +1,8 @@
 """
-GorodTradeBot v7.4 - Final Night Mode
+GorodTradeBot v7.9 - Final Fixed
 Pocket Real + Crypto (BTC/ETH/SOL)
-1 запрос M1 -> M5/M15/H1 локально, без pandas, time-based агрегация
-Актуальные модели Gemini (Ноябрь 2026) с retry и таймаутом 120с
+Исправлены баги: edit_message_text + utcnow
+Актуальные модели Gemini (Ноябрь 2026)
 """
 import telebot
 import json
@@ -11,7 +11,7 @@ import threading
 import requests
 import base64
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telebot import types as T
 
@@ -22,7 +22,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"GorodTradeBot v7.4 Night Mode is running!")
+        self.wfile.write(b"GorodTradeBot v7.9 Fixed")
     
     def log_message(self, format, *args):
         pass
@@ -93,7 +93,7 @@ def cache_set(k, d):
 # 5. ЛОГИКА РЫНКОВ И АГРЕГАЦИЯ
 # ============================================================
 def is_forex_open():
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     weekday = now.weekday()
     hour = now.hour
     if weekday == 5:  # Суббота
@@ -183,6 +183,7 @@ user_pending = {}
 user_photo_mode = {}
 
 def kb_main():
+    """ReplyKeyboardMarkup для send_message (обычные кнопки)"""
     m = T.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3, is_persistent=True)
     if is_forex_open():
         m.add(T.KeyboardButton("/eurusd"), T.KeyboardButton("/gbpusd"), T.KeyboardButton("/btc"))
@@ -190,6 +191,33 @@ def kb_main():
     else:
         m.add(T.KeyboardButton("/btc"), T.KeyboardButton("/eth"), T.KeyboardButton("/sol"))
         m.add(T.KeyboardButton("/eurusd"), T.KeyboardButton("/otc"), T.KeyboardButton("/real"))
+    return m
+
+def kb_inline_main():
+    """InlineKeyboardMarkup для edit_message_text (кнопки внутри сообщения)"""
+    m = T.InlineKeyboardMarkup(row_width=3)
+    if is_forex_open():
+        m.add(
+            T.InlineKeyboardButton("EUR/USD", callback_data="pair_eurusd"),
+            T.InlineKeyboardButton("GBP/USD", callback_data="pair_gbpusd"),
+            T.InlineKeyboardButton("BTC", callback_data="pair_btc")
+        )
+        m.add(
+            T.InlineKeyboardButton("USD/JPY", callback_data="pair_usdjpy"),
+            T.InlineKeyboardButton("OTC", callback_data="mode_otc"),
+            T.InlineKeyboardButton("REAL", callback_data="mode_real")
+        )
+    else:
+        m.add(
+            T.InlineKeyboardButton("BTC", callback_data="pair_btc"),
+            T.InlineKeyboardButton("ETH", callback_data="pair_eth"),
+            T.InlineKeyboardButton("SOL", callback_data="pair_sol")
+        )
+        m.add(
+            T.InlineKeyboardButton("EUR/USD", callback_data="pair_eurusd"),
+            T.InlineKeyboardButton("OTC", callback_data="mode_otc"),
+            T.InlineKeyboardButton("REAL", callback_data="mode_real")
+        )
     return m
 
 def kb_tf():
@@ -268,7 +296,7 @@ def bollinger(prices, period=20, mult=2.0):
     sma = sum(s) / period
     var = sum((x - sma)**2 for x in s) / period
     std = var ** 0.5
-    u, l = sma + mult * std, sma - mult * std  # ИСПРАВЛЕНО: mult * std
+    u, l = sma + mult * std, sma - mult * std
     p = prices[-1]
     pos = "above_upper" if p > u else "below_lower" if p < l else "inside"
     return {"sma": sma, "upper": u, "lower": l, "pos": pos}
@@ -374,7 +402,7 @@ def ask_gemini(prompt, image_bytes=None):
 def cmd_start(m):
     status = "Real ОТКРЫТ" if is_forex_open() else "Real ЗАКРЫТ (ночь/выходные)"
     bot.send_message(m.chat.id,
-        f"GorodTradeBot v7.4 Night Mode\n{status}\n\nREAL (Пн-Пт):\n/eurusd /gbpusd /usdjpy\n\nCRYPTO (24/7):\n/btc /eth /sol\n\nСкрины:\n/otc /real",
+        f"GorodTradeBot v7.9 Fixed\n{status}\n\nREAL (Пн-Пт):\n/eurusd /gbpusd /usdjpy\n\nCRYPTO (24/7):\n/btc /eth /sol\n\nСкрины:\n/otc /real",
         reply_markup=kb_main())
 
 @bot.message_handler(commands=['otc'])
@@ -479,13 +507,15 @@ LIVE ({symbol}, сигнал на {tf_key} мин):
             f"BB: {bb_v['pos']} ATR: {atr_v:.5f} | Экспирация: {tf['exp']}м\n\n"
         )
         
-        bot.edit_message_text(header + text, chat_id=chat_id, message_id=msg_id, reply_markup=kb_main())
+        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
+        bot.edit_message_text(header + text, chat_id=chat_id, message_id=msg_id, reply_markup=kb_inline_main())
         
     except Exception as e:
         print(f"[ERROR] {symbol}: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        bot.edit_message_text(f"Ошибка: {e}", chat_id=chat_id, message_id=msg_id, reply_markup=kb_main())
+        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
+        bot.edit_message_text(f"Ошибка: {e}", chat_id=chat_id, message_id=msg_id, reply_markup=kb_inline_main())
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
@@ -498,14 +528,16 @@ def handle_photo(m):
         base_text = json.dumps(base[:10], ensure_ascii=False)[:2500]
         prompt = f"{MASTER_PROMPT}\nРежим: {mode}\nБАЗА:\n{base_text}\n\nЗадача: анализ скриншота. Кратко!"
         text = ask_gemini(prompt, image_bytes=img)
-        bot.edit_message_text(text, chat_id=m.chat.id, message_id=loading.message_id, reply_markup=kb_main())
+        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
+        bot.edit_message_text(text, chat_id=m.chat.id, message_id=loading.message_id, reply_markup=kb_inline_main())
     except Exception as e:
-        bot.edit_message_text(f"Ошибка фото: {e}", chat_id=m.chat.id, message_id=loading.message_id)
+        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
+        bot.edit_message_text(f"Ошибка фото: {e}", chat_id=m.chat.id, message_id=loading.message_id, reply_markup=kb_inline_main())
 
 # ============================================================
 # 10. ЗАПУСК
 # ============================================================
 if __name__ == "__main__":
-    print("[START] GorodTradeBot v7.4 Night Mode", flush=True)
+    print("[START] GorodTradeBot v7.9 Fixed", flush=True)
     print(f"[INFO] Forex open: {is_forex_open()}", flush=True)
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
