@@ -1,6 +1,7 @@
 """
-GorodTradeBot v7.7 FINAL (Актуально для 2026: gemini-3.8-flash)
-LIVE (Real+Crypto) + OTC/REAL по скринам + Сканеры + Night Mode
+GorodTradeBot v7.8 FINAL
+LIVE (Real+Crypto) + OTC/REAL по скринам + Сканеры + Night Mode + Кнопка Отмена
+Модель: gemini-3.8-flash (актуально для ноября 2026)
 """
 import telebot
 import json
@@ -10,7 +11,7 @@ import traceback
 import requests
 import base64
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telebot import types as T
 
@@ -21,7 +22,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"GorodTradeBot v7.7 FINAL")
+        self.wfile.write(b"GorodTradeBot v7.8 FINAL")
     
     def log_message(self, format, *args):
         pass
@@ -110,7 +111,7 @@ def cache_set(k, d):
 # 5. РЫНОК: REAL vs CRYPTO
 # ============================================================
 def is_forex_open():
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     weekday = now.weekday()
     hour = now.hour
     
@@ -184,7 +185,7 @@ def resample_m1_to_tf(candles_m1, target_minutes, is_crypto=False):
     return result
 
 # ============================================================
-# 7. ПАРЫ И ТФ (БЕЗ ПРОБЕЛОВ!)
+# 7. ПАРЫ И ТФ
 # ============================================================
 PAIRS = {
     "/eurusd": "EUR/USD",
@@ -227,13 +228,16 @@ def kb_main():
     return m
 
 def kb_tf():
-    m = T.InlineKeyboardMarkup(row_width=5)
+    m = T.InlineKeyboardMarkup(row_width=3)
     m.add(
         T.InlineKeyboardButton("1м", callback_data="tf_1"),
         T.InlineKeyboardButton("2м", callback_data="tf_2"),
-        T.InlineKeyboardButton("3м", callback_data="tf_3"),
+        T.InlineKeyboardButton("3м", callback_data="tf_3")
+    )
+    m.add(
         T.InlineKeyboardButton("5м", callback_data="tf_5"),
         T.InlineKeyboardButton("15м", callback_data="tf_15"),
+        T.InlineKeyboardButton("❌ Отмена", callback_data="cancel_tf")
     )
     return m
 
@@ -248,7 +252,7 @@ def get_candles_m1(symbol, limit=300):
         return c
     
     STATS["requests"] += 1
-    STATS["last_request"] = datetime.utcnow().strftime("%H:%M:%S")
+    STATS["last_request"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
     
     r = requests.get("https://api.twelvedata.com/time_series",
         params={"symbol": symbol, "interval": "1min", "outputsize": limit, 
@@ -343,7 +347,7 @@ def trend_direction(prices):
     return "боковик"
 
 # ============================================================
-# 11. GEMINI HTTP (ОБНОВЛЕНО: gemini-3.8-flash)
+# 11. GEMINI HTTP (gemini-3.8-flash)
 # ============================================================
 def ask_gemini(prompt, image_bytes=None):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_KEY}"
@@ -372,7 +376,7 @@ def ask_gemini(prompt, image_bytes=None):
 def cmd_start(m):
     status = "Real ОТКРЫТ" if is_forex_open() else "Real ЗАКРЫТ (ночь/выходные)"
     bot.send_message(m.chat.id,
-        f"GorodTradeBot v7.7 FINAL\n{status}\n\n"
+        f"GorodTradeBot v7.8 FINAL\n{status}\n\n"
         "🔍 ОДИНОЧНЫЙ АНАЛИЗ:\n"
         "/eurusd /gbpusd /btc (выбор ТФ)\n\n"
         "🌐 МАССОВОЕ СКАНИРОВАНИЕ (15м):\n"
@@ -435,6 +439,18 @@ def cmd_pair(m):
     
     user_pending[m.chat.id] = symbol
     bot.send_message(m.chat.id, f"Пара: {symbol}\nВыбери ТФ:", reply_markup=kb_tf())
+
+@bot.callback_query_handler(func=lambda c: c.data == "cancel_tf")
+def cb_cancel(call):
+    if call.message.chat.id in user_pending:
+        del user_pending[call.message.chat.id]
+    
+    bot.edit_message_text(
+        "✅ Выбор отменен. Нажми команду пары, чтобы начать заново (например, /eurusd или /btc).",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=None
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("tf_"))
 def cb_tf(call):
@@ -520,16 +536,16 @@ LIVE ({symbol}, сигнал на {tf_key} мин):
             f"BB: {bb_v['pos']} ATR: {atr_v:.5f} | Экспирация: {tf['exp']}м\n\n"
         )
         
-        bot.edit_message_text(header + text, chat_id=chat_id, message_id=msg_id, reply_markup=kb_main())
+        bot.edit_message_text(header + text, chat_id=chat_id, message_id=msg_id, reply_markup=None)
         
     except Exception as e:
         STATS["errors"] += 1
         print(f"[ERROR] {symbol}: {e}", flush=True)
         traceback.print_exc()
-        bot.edit_message_text(f"Ошибка: {e}", chat_id=chat_id, message_id=msg_id, reply_markup=kb_main())
+        bot.edit_message_text(f"Ошибка: {e}", chat_id=chat_id, message_id=msg_id, reply_markup=None)
 
 # ============================================================
-# 14. ФОТО РЕЖИМ (OTC/REAL по скринам)
+# 14. ФОТО РЕЖИМ
 # ============================================================
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
@@ -557,7 +573,7 @@ def handle_photo(m):
 Верни ответ по формату из master_prompt."""
 
         text = ask_gemini(prompt, image_bytes=img)
-        bot.edit_message_text(text, chat_id=m.chat.id, message_id=loading.message_id, reply_markup=kb_main())
+        bot.edit_message_text(text, chat_id=m.chat.id, message_id=loading.message_id, reply_markup=None)
     except Exception as e:
         STATS["errors"] += 1
         bot.edit_message_text(f"❌ Ошибка фото: {e}", chat_id=m.chat.id, message_id=loading.message_id)
@@ -654,7 +670,7 @@ def run_batch_scan(message, pair_dict, scan_name, tf_key="15"):
             f"📊 РЕЗУЛЬТАТЫ:\n{final_text}",
             chat_id=message.chat.id,
             message_id=loading_msg.message_id,
-            reply_markup=kb_main()
+            reply_markup=None
         )
     except:
         bot.send_message(message.chat.id, f"✅ Скан завершен!\n\n{final_text}", reply_markup=kb_main())
@@ -707,7 +723,7 @@ def cmd_scan_all(m):
 # 16. ЗАПУСК
 # ============================================================
 if __name__ == "__main__":
-    print("[START] GorodTradeBot v7.7 FINAL", flush=True)
+    print("[START] GorodTradeBot v7.8 FINAL", flush=True)
     print(f"[INFO] Forex open: {is_forex_open()}", flush=True)
     print(f"[INFO] Пар: {len(PAIRS)}, ТФ: {len(TIMEFRAMES)}", flush=True)
     print(f"[INFO] OTC база: {len(OTC_BASE)} индикаторов", flush=True)
