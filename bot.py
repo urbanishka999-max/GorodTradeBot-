@@ -1,12 +1,10 @@
 """
-GorodTradeBot v7.5 Scanner — Production Ready
-Night Mode + Multi-TF + Batch Scanner + Status
-1 запрос M1 -> M5/M15/H1 локально, без pandas, time-based агрегация
+GorodTradeBot v7.6 FINAL
+LIVE (Real+Crypto) + OTC/REAL по скринам + Сканеры + Night Mode
 """
 import telebot
 import json
 import os
-import sys
 import threading
 import traceback
 import requests
@@ -23,7 +21,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"GorodTradeBot v7.5 Scanner")
+        self.wfile.write(b"GorodTradeBot v7.6 FINAL")
     
     def log_message(self, format, *args):
         pass
@@ -374,7 +372,7 @@ def ask_gemini(prompt, image_bytes=None):
 def cmd_start(m):
     status = "Real ОТКРЫТ" if is_forex_open() else "Real ЗАКРЫТ (ночь/выходные)"
     bot.send_message(m.chat.id,
-        f"GorodTradeBot v7.5 Scanner\n{status}\n\n"
+        f"GorodTradeBot v7.6 FINAL\n{status}\n\n"
         "🔍 ОДИНОЧНЫЙ АНАЛИЗ:\n"
         "/eurusd /gbpusd /btc (выбор ТФ)\n\n"
         "🌐 МАССОВОЕ СКАНИРОВАНИЕ (15м):\n"
@@ -382,7 +380,8 @@ def cmd_start(m):
         "/scan_crypto — все крипто-пары\n"
         "/scan_all — весь рынок сразу\n\n"
         "📸 СКРИНШОТЫ:\n"
-        "/otc /real\n\n"
+        "/otc — OTC режим (кидай скрин)\n"
+        "/real — REAL режим (кидай скрин)\n\n"
         "📊 СТАТУС:\n"
         "/status",
         reply_markup=kb_main())
@@ -409,12 +408,12 @@ def cmd_status(m):
 @bot.message_handler(commands=['otc'])
 def cmd_otc(m):
     user_photo_mode[m.chat.id] = 'OTC'
-    bot.send_message(m.chat.id, "OTC режим. Кидай скрин.", reply_markup=kb_main())
+    bot.send_message(m.chat.id, "📉 OTC режим активирован. Кидай скриншот графика Pocket Option.", reply_markup=kb_main())
 
 @bot.message_handler(commands=['real'])
 def cmd_real(m):
     user_photo_mode[m.chat.id] = 'REAL'
-    bot.send_message(m.chat.id, "REAL режим. Выбери пару.", reply_markup=kb_main())
+    bot.send_message(m.chat.id, "📈 REAL режим активирован. Кидай скриншот графика.", reply_markup=kb_main())
 
 @bot.message_handler(commands=[k.lstrip('/') for k in PAIRS.keys()])
 def cmd_pair(m):
@@ -530,36 +529,49 @@ LIVE ({symbol}, сигнал на {tf_key} мин):
         bot.edit_message_text(f"Ошибка: {e}", chat_id=chat_id, message_id=msg_id, reply_markup=kb_main())
 
 # ============================================================
-# 14. ФОТО
+# 14. ФОТО РЕЖИМ (OTC/REAL по скринам)
 # ============================================================
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
     mode = user_photo_mode.get(m.chat.id, 'REAL')
-    loading = bot.send_message(m.chat.id, f"Анализирую ({mode})...")
+    loading = bot.send_message(m.chat.id, f"📸 Анализирую скриншот ({mode})...")
     
     try:
         fi = bot.get_file(m.photo[-1].file_id)
         img = bot.download_file(fi.file_path)
+        
+        # Выбираем базу: OTC или REAL
         base = OTC_BASE if mode == 'OTC' else REAL_BASE
         base_text = json.dumps(base[:10], ensure_ascii=False)[:2500]
         
-        prompt = f"{MASTER_PROMPT}\nРежим: {mode}\nБАЗА:\n{base_text}\n\nЗадача: анализ скриншота."
+        prompt = f"""{MASTER_PROMPT}
+
+Режим: {mode}
+БАЗА ЗНАНИЙ ({len(base)} индикаторов):
+{base_text}
+
+ЗАДАЧА: Проанализируй скриншот графика Pocket Option.
+- Если видишь аномально длинную свечу (новостной импульс) → WAIT
+- Если полосы Боллинджера сузились → WAIT
+- Уверенность 55-75%
+
+Верни ответ по формату из master_prompt."""
+
         text = ask_gemini(prompt, image_bytes=img)
         bot.edit_message_text(text, chat_id=m.chat.id, message_id=loading.message_id, reply_markup=kb_main())
     except Exception as e:
         STATS["errors"] += 1
-        bot.edit_message_text(f"Ошибка фото: {e}", chat_id=m.chat.id, message_id=loading.message_id)
+        bot.edit_message_text(f"❌ Ошибка фото: {e}", chat_id=m.chat.id, message_id=loading.message_id)
 
 # ============================================================
-# 15. МАССОВОЕ СКАНИРОВАНИЕ (v7.5 Scanner)
+# 15. МАССОВОЕ СКАНИРОВАНИЕ
 # ============================================================
 def run_batch_scan(message, pair_dict, scan_name, tf_key="15"):
-    """Сканирует список пар в отдельном потоке с паузой для лимитов API"""
     tf = TIMEFRAMES[tf_key]
     loading_msg = bot.send_message(
         message.chat.id, 
-        f"🔄 Запускаю глубокое сканирование {scan_name} (ТФ {tf_key}м).\n"
-        f"Это займет ~{len(pair_dict)*8} сек из-за лимитов API. Жди...", 
+        f"🔄 Запускаю сканирование {scan_name} (ТФ {tf_key}м).\n"
+        f"Это займет ~{len(pair_dict)*8} сек. Жди...", 
         reply_markup=kb_main()
     )
     
@@ -569,8 +581,7 @@ def run_batch_scan(message, pair_dict, scan_name, tf_key="15"):
     for i, (cmd, symbol) in enumerate(pair_dict.items(), 1):
         try:
             bot.edit_message_text(
-                f"⏳ Анализирую {symbol}... ({i}/{total})\n"
-                f"Пожалуйста, подожди, соблюдаем лимиты API...", 
+                f"⏳ Анализирую {symbol}... ({i}/{total})", 
                 chat_id=message.chat.id, 
                 message_id=loading_msg.message_id
             )
@@ -615,49 +626,41 @@ def run_batch_scan(message, pair_dict, scan_name, tf_key="15"):
 
     try:
         bot.edit_message_text(
-            "🧠 Отправляю данные в Gemini для анализа...", 
+            "🧠 Отправляю данные в Gemini...", 
             chat_id=message.chat.id, 
             message_id=loading_msg.message_id
         )
     except:
         pass
     
-    batch_prompt = f"""Ты профессиональный скальпер. Проанализируй эти технические данные для таймфрейма {tf_key} минут.
+    batch_prompt = f"""Ты профессиональный скальпер. Проанализируй эти данные для ТФ {tf_key} минут.
 
 ДАННЫЕ:
 {chr(10).join(results_data)}
 
 ЗАДАЧА:
-Для каждой пары оцени ситуацию. Верни ТОЛЬКО те пары, где есть четкий сигнал с уверенностью 60% и выше.
-Для каждой подходящей пары выведи одну строку в формате:
-🟢 {symbol}: CALL (Уверенность: X%) - Краткая причина
-🔴 {symbol}: PUT (Уверенность: X%) - Краткая причина
-🟡 {symbol}: WAIT (Уверенность: X%) - Краткая причина
+Верни ТОЛЬКО пары с уверенностью 60%+. Формат:
+🟢 {symbol}: CALL (X%) - Причина
+🔴 {symbol}: PUT (X%) - Причина
+🟡 {symbol}: WAIT (X%) - Причина
 
-Если сильных сигналов нет, так и напиши: "Сильных сигналов сейчас нет, лучше переждать".
-Не используй Markdown, просто текст с эмодзи."""
+Если сильных сигналов нет: "Сильных сигналов нет, лучше переждать"."""
 
     final_text = ask_gemini(batch_prompt)
     
     try:
         bot.edit_message_text(
             f"✅ СКАНИРОВАНИЕ {scan_name} ЗАВЕРШЕНО!\n\n"
-            f"Таймфрейм: {tf_key} минут\n"
-            f"Проанализировано пар: {total}\n\n"
+            f"ТФ: {tf_key} мин | Пар: {total}\n\n"
             f"📊 РЕЗУЛЬТАТЫ:\n{final_text}",
             chat_id=message.chat.id,
             message_id=loading_msg.message_id,
             reply_markup=kb_main()
         )
-    except Exception as e:
-        bot.send_message(
-            message.chat.id,
-            f"✅ Скан завершен!\n\n{final_text}",
-            reply_markup=kb_main()
-        )
+    except:
+        bot.send_message(message.chat.id, f"✅ Скан завершен!\n\n{final_text}", reply_markup=kb_main())
 
 def run_batch_scan_threaded(message, pair_dict, scan_name, tf_key="15"):
-    """Запускает сканер в отдельном потоке, чтобы не блокировать бота"""
     thread = threading.Thread(
         target=run_batch_scan,
         args=(message, pair_dict, scan_name, tf_key),
@@ -670,8 +673,8 @@ def cmd_scan_forex(m):
     if not is_forex_open():
         bot.send_message(
             m.chat.id,
-            "⚠️ Forex Real сейчас закрыт (ночь/выходные).\n"
-            "Используй /scan_crypto для анализа криптовалют 24/7.",
+            "⚠️ Forex закрыт (ночь/выходные).\n"
+            "Используй /scan_crypto для криптовалют 24/7.",
             reply_markup=kb_main()
         )
         return
@@ -705,7 +708,9 @@ def cmd_scan_all(m):
 # 16. ЗАПУСК
 # ============================================================
 if __name__ == "__main__":
-    print("[START] GorodTradeBot v7.5 Scanner", flush=True)
+    print("[START] GorodTradeBot v7.6 FINAL", flush=True)
     print(f"[INFO] Forex open: {is_forex_open()}", flush=True)
     print(f"[INFO] Пар: {len(PAIRS)}, ТФ: {len(TIMEFRAMES)}", flush=True)
+    print(f"[INFO] OTC база: {len(OTC_BASE)} индикаторов", flush=True)
+    print(f"[INFO] REAL база: {len(REAL_BASE)} индикаторов", flush=True)
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
