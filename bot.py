@@ -1,5 +1,5 @@
 """
-GorodTradeBot v7.6 FINAL
+GorodTradeBot v7.7 FINAL (Актуально для 2026: gemini-3.8-flash)
 LIVE (Real+Crypto) + OTC/REAL по скринам + Сканеры + Night Mode
 """
 import telebot
@@ -21,7 +21,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"GorodTradeBot v7.6 FINAL")
+        self.wfile.write(b"GorodTradeBot v7.7 FINAL")
     
     def log_message(self, format, *args):
         pass
@@ -343,10 +343,10 @@ def trend_direction(prices):
     return "боковик"
 
 # ============================================================
-# 11. GEMINI HTTP
+# 11. GEMINI HTTP (ОБНОВЛЕНО: gemini-3.8-flash)
 # ============================================================
 def ask_gemini(prompt, image_bytes=None):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_KEY}"
     parts = [{"text": prompt}]
     
     if image_bytes:
@@ -372,7 +372,7 @@ def ask_gemini(prompt, image_bytes=None):
 def cmd_start(m):
     status = "Real ОТКРЫТ" if is_forex_open() else "Real ЗАКРЫТ (ночь/выходные)"
     bot.send_message(m.chat.id,
-        f"GorodTradeBot v7.6 FINAL\n{status}\n\n"
+        f"GorodTradeBot v7.7 FINAL\n{status}\n\n"
         "🔍 ОДИНОЧНЫЙ АНАЛИЗ:\n"
         "/eurusd /gbpusd /btc (выбор ТФ)\n\n"
         "🌐 МАССОВОЕ СКАНИРОВАНИЕ (15м):\n"
@@ -540,7 +540,6 @@ def handle_photo(m):
         fi = bot.get_file(m.photo[-1].file_id)
         img = bot.download_file(fi.file_path)
         
-        # Выбираем базу: OTC или REAL
         base = OTC_BASE if mode == 'OTC' else REAL_BASE
         base_text = json.dumps(base[:10], ensure_ascii=False)[:2500]
         
@@ -708,7 +707,7 @@ def cmd_scan_all(m):
 # 16. ЗАПУСК
 # ============================================================
 if __name__ == "__main__":
-    print("[START] GorodTradeBot v7.6 FINAL", flush=True)
+    print("[START] GorodTradeBot v7.7 FINAL", flush=True)
     print(f"[INFO] Forex open: {is_forex_open()}", flush=True)
     print(f"[INFO] Пар: {len(PAIRS)}, ТФ: {len(TIMEFRAMES)}", flush=True)
     print(f"[INFO] OTC база: {len(OTC_BASE)} индикаторов", flush=True)
