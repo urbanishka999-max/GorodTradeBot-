@@ -1,28 +1,30 @@
 """
-GorodTradeBot v7.9 - Final Fixed
-Pocket Real + Crypto (BTC/ETH/SOL)
-Исправлены баги: edit_message_text + utcnow
+GorodTradeBot v8.1 Hybrid C
+Python = Страж (считает Score, свип, тренд)
+ИИ = Аналитик (вызывается только при Score >= 2)
 Актуальные модели Gemini (Ноябрь 2026)
 """
 import telebot
 import json
 import os
+import re
 import threading
 import requests
 import base64
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telebot import types as T
 
 # ============================================================
-# 1. KEEP-ALIVE СЕРВЕР (чтобы Render не усыплял бота)
+# 1. KEEP-ALIVE СЕРВЕР
 # ============================================================
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"GorodTradeBot v7.9 Fixed")
+        self.wfile.write(b"GorodTradeBot v8.1 Hybrid C")
     
     def log_message(self, format, *args):
         pass
@@ -55,10 +57,18 @@ def load_json(fn):
     try:
         with open(fn, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        # Автоочистка ключей от пробелов
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    keys_to_fix = list(item.keys())
+                    for key in keys_to_fix:
+                        if key != key.strip():
+                            item[key.strip()] = item.pop(key)
         print(f"[OK] {fn}: {len(data)} карточек", flush=True)
         return data
     except Exception as e:
-        print(f"[WARN] {fn} не найден или ошибка: {e}", flush=True)
+        print(f"[WARN] {fn} не найден: {e}", flush=True)
         return []
 
 OTC_BASE = load_json('pocket_OTC.json')
@@ -68,16 +78,16 @@ MASTER_PROMPT = ""
 try:
     with open('master_prompt_v2.md', 'r', encoding='utf-8') as f:
         MASTER_PROMPT = f.read()
-    print(f"[OK] master_prompt_v2.md загружен", flush=True)
+    print(f"[OK] master_prompt_v2.md загружен ({len(MASTER_PROMPT)} символов)", flush=True)
 except Exception:
-    MASTER_PROMPT = "Ты профессиональный скальпер бинарных опционов."
-    print("[WARN] master_prompt_v2.md не найден, используется базовый", flush=True)
+    MASTER_PROMPT = "Ты профессиональный скальпер бинарных опционов Pocket Option."
+    print("[WARN] master_prompt_v2.md не найден", flush=True)
 
 # ============================================================
-# 4. КЭШ ДЛЯ ЭКОНОМИИ ЗАПРОСОВ
+# 4. КЭШ
 # ============================================================
 CACHE = {}
-CACHE_TTL = 30  # секунд
+CACHE_TTL = 30
 
 def cache_get(k):
     if k in CACHE:
@@ -90,23 +100,26 @@ def cache_set(k, d):
     CACHE[k] = (d, time.time())
 
 # ============================================================
-# 5. ЛОГИКА РЫНКОВ И АГРЕГАЦИЯ
+# 5. ЛОГИКА РЫНКОВ
 # ============================================================
 def is_forex_open():
     now = datetime.now(timezone.utc)
     weekday = now.weekday()
     hour = now.hour
-    if weekday == 5:  # Суббота
+    if weekday == 5:
         return False
-    if weekday == 6 and hour < 22:  # Воскресенье до 22:00
+    if weekday == 6 and hour < 22:
         return False
-    if weekday == 4 and hour >= 22:  # Пятница после 22:00
+    if weekday == 4 and hour >= 22:
         return False
     return True
 
 def is_crypto_symbol(symbol):
     return any(c in symbol for c in ["BTC", "ETH", "SOL"])
 
+# ============================================================
+# 6. АГРЕГАЦИЯ M1 -> M5/M15/H1
+# ============================================================
 def resample_m1_to_tf(candles_m1, target_minutes, is_crypto=False):
     if not candles_m1:
         return []
@@ -162,7 +175,7 @@ def resample_m1_to_tf(candles_m1, target_minutes, is_crypto=False):
     return result
 
 # ============================================================
-# 6. НАСТРОЙКИ И КЛАВИАТУРЫ
+# 7. НАСТРОЙКИ И КЛАВИАТУРЫ
 # ============================================================
 PAIRS = {
     "/eurusd": "EUR/USD", "/gbpusd": "GBP/USD", "/usdjpy": "USD/JPY",
@@ -183,7 +196,6 @@ user_pending = {}
 user_photo_mode = {}
 
 def kb_main():
-    """ReplyKeyboardMarkup для send_message (обычные кнопки)"""
     m = T.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3, is_persistent=True)
     if is_forex_open():
         m.add(T.KeyboardButton("/eurusd"), T.KeyboardButton("/gbpusd"), T.KeyboardButton("/btc"))
@@ -194,30 +206,17 @@ def kb_main():
     return m
 
 def kb_inline_main():
-    """InlineKeyboardMarkup для edit_message_text (кнопки внутри сообщения)"""
     m = T.InlineKeyboardMarkup(row_width=3)
-    if is_forex_open():
-        m.add(
-            T.InlineKeyboardButton("EUR/USD", callback_data="pair_eurusd"),
-            T.InlineKeyboardButton("GBP/USD", callback_data="pair_gbpusd"),
-            T.InlineKeyboardButton("BTC", callback_data="pair_btc")
-        )
-        m.add(
-            T.InlineKeyboardButton("USD/JPY", callback_data="pair_usdjpy"),
-            T.InlineKeyboardButton("OTC", callback_data="mode_otc"),
-            T.InlineKeyboardButton("REAL", callback_data="mode_real")
-        )
-    else:
-        m.add(
-            T.InlineKeyboardButton("BTC", callback_data="pair_btc"),
-            T.InlineKeyboardButton("ETH", callback_data="pair_eth"),
-            T.InlineKeyboardButton("SOL", callback_data="pair_sol")
-        )
-        m.add(
-            T.InlineKeyboardButton("EUR/USD", callback_data="pair_eurusd"),
-            T.InlineKeyboardButton("OTC", callback_data="mode_otc"),
-            T.InlineKeyboardButton("REAL", callback_data="mode_real")
-        )
+    m.add(
+        T.InlineKeyboardButton("EUR/USD", callback_data="pair_eurusd"),
+        T.InlineKeyboardButton("GBP/USD", callback_data="pair_gbpusd"),
+        T.InlineKeyboardButton("BTC", callback_data="pair_btc")
+    )
+    m.add(
+        T.InlineKeyboardButton("USD/JPY", callback_data="pair_usdjpy"),
+        T.InlineKeyboardButton("OTC", callback_data="mode_otc"),
+        T.InlineKeyboardButton("REAL", callback_data="mode_real")
+    )
     return m
 
 def kb_tf():
@@ -232,7 +231,7 @@ def kb_tf():
     return m
 
 # ============================================================
-# 7. ПОЛУЧЕНИЕ ДАННЫХ И ИНДИКАТОРЫ
+# 8. ПОЛУЧЕНИЕ ДАННЫХ
 # ============================================================
 def get_candles_m1(symbol, limit=300):
     key = f"{symbol}_m1_{limit}"
@@ -243,7 +242,8 @@ def get_candles_m1(symbol, limit=300):
     
     r = requests.get(
         "https://api.twelvedata.com/time_series",
-        params={"symbol": symbol, "interval": "1min", "outputsize": limit, "apikey": TWELVE_KEY, "format": "JSON"},
+        params={"symbol": symbol, "interval": "1min", "outputsize": limit, 
+                "apikey": TWELVE_KEY, "format": "JSON"},
         timeout=15
     )
     data = r.json()
@@ -265,6 +265,9 @@ def get_all_tfs(symbol):
         "h1": resample_m1_to_tf(m1, 60, is_crypto=crypto),
     }
 
+# ============================================================
+# 9. ИНДИКАТОРЫ
+# ============================================================
 def ema(prices, period):
     if len(prices) < period:
         return prices[-1] if prices else 0
@@ -331,21 +334,17 @@ def trend_direction(prices):
     return "боковик"
 
 # ============================================================
-# 8. GEMINI API (АКТУАЛЬНОЕ НА НОЯБРЬ 2026)
+# 10. GEMINI API
 # ============================================================
 def ask_gemini(prompt, image_bytes=None):
-    """Запрос к Gemini с retry логикой и актуальными моделями (Ноябрь 2026)"""
-    import time
-    
-    # Актуальный список моделей (от самого быстрого к флагману)
     models = [
-        "gemini-3.5-flash-lite",  # Самый быстрый (3-5 сек), идеален для сканера
-        "gemini-3.8-flash",       # Флагман GA, 1M контекст, надежный fallback
-        "gemini-3.6-flash"        # Средний вариант с Free Tier
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash"
     ]
     
     for model in models:
-        for attempt in range(2):  # 2 попытки на каждую модель
+        for attempt in range(2):
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
                 
@@ -367,8 +366,6 @@ def ask_gemini(prompt, image_bytes=None):
                 }
                 
                 print(f"[GEMINI] {model} (попытка {attempt+1}/2)...", flush=True)
-                
-                # Увеличенный таймаут: 120 секунд вместо 60
                 r = requests.post(url, json=payload, timeout=120)
                 
                 if r.status_code == 200:
@@ -376,44 +373,45 @@ def ask_gemini(prompt, image_bytes=None):
                     if "candidates" in data and data["candidates"]:
                         response_text = data["candidates"][0]["content"]["parts"][0]["text"]
                         if attempt > 0 or model != models[0]:
-                            print(f"[GEMINI] ✅ Успех с {model} (попытка {attempt+1})", flush=True)
+                            print(f"[GEMINI] ✅ Успех с {model}", flush=True)
                         return response_text
                 
-                print(f"[GEMINI] {model} вернул {r.status_code}, попытка {attempt+1}/2", flush=True)
+                print(f"[GEMINI] {model} вернул {r.status_code}", flush=True)
                 
             except requests.exceptions.Timeout:
-                print(f"[GEMINI] {model} таймаут, попытка {attempt+1}/2", flush=True)
+                print(f"[GEMINI] {model} таймаут (попытка {attempt+1}/2)", flush=True)
             except Exception as e:
-                print(f"[GEMINI] {model} ошибка: {e}, попытка {attempt+1}/2", flush=True)
+                print(f"[GEMINI] {model} ошибка: {e}", flush=True)
             
-            # Короткая пауза перед повторной попыткой
             if attempt == 0:
                 time.sleep(2)
         
         print(f"[GEMINI] Переход к следующей модели после {model}", flush=True)
     
-    # Все модели и попытки исчерпаны
-    return "❌ Gemini недоступен (таймаут или ошибка API). Попробуйте через 30 секунд."
+    return "❌ Gemini недоступен. Попробуйте через 30 секунд."
 
 # ============================================================
-# 9. ОБРАБОТЧИКИ КОМАНД
+# 11. ОБРАБОТЧИКИ КОМАНД
 # ============================================================
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(m):
     status = "Real ОТКРЫТ" if is_forex_open() else "Real ЗАКРЫТ (ночь/выходные)"
     bot.send_message(m.chat.id,
-        f"GorodTradeBot v7.9 Fixed\n{status}\n\nREAL (Пн-Пт):\n/eurusd /gbpusd /usdjpy\n\nCRYPTO (24/7):\n/btc /eth /sol\n\nСкрины:\n/otc /real",
+        f"GorodTradeBot v8.1 Hybrid C\n{status}\n\n"
+        f"REAL (Пн-Пт):\n/eurusd /gbpusd /usdjpy\n\n"
+        f"CRYPTO (24/7):\n/btc /eth /sol\n\n"
+        f"Скрины:\n/otc /real",
         reply_markup=kb_main())
 
 @bot.message_handler(commands=['otc'])
 def cmd_otc(m):
     user_photo_mode[m.chat.id] = 'OTC'
-    bot.send_message(m.chat.id, "OTC режим. Кидай скрин.", reply_markup=kb_main())
+    bot.send_message(m.chat.id, "📉 OTC режим. Кидай скрин.", reply_markup=kb_main())
 
 @bot.message_handler(commands=['real'])
 def cmd_real(m):
     user_photo_mode[m.chat.id] = 'REAL'
-    bot.send_message(m.chat.id, "REAL режим. Выбери пару.", reply_markup=kb_main())
+    bot.send_message(m.chat.id, "📈 REAL режим. Выбери пару.", reply_markup=kb_main())
 
 @bot.message_handler(commands=[k.lstrip('/') for k in PAIRS.keys()])
 def cmd_pair(m):
@@ -423,7 +421,9 @@ def cmd_pair(m):
     symbol = PAIRS[cmd]
     if not is_crypto_symbol(symbol) and not is_forex_open():
         bot.send_message(m.chat.id,
-            f"⚠️ {symbol} Real сейчас закрыт.\nForex работает Пн-Пт. Сейчас доступны:\n/btc /eth /sol - крипта 24/7",
+            f"⚠️ {symbol} Real сейчас закрыт.\n"
+            f"Forex работает Пн-Пт. Сейчас доступны:\n"
+            f"/btc /eth /sol - крипта 24/7",
             reply_markup=kb_main())
         return
     user_pending[m.chat.id] = symbol
@@ -444,10 +444,13 @@ def cb_tf(call):
     
     tf = TIMEFRAMES[tf_key]
     bot.answer_callback_query(call.id, f"{symbol} {tf_key}м...")
-    bot.edit_message_text(f"Анализирую {symbol} {tf_key}м...",
+    bot.edit_message_text(f"⏳ Анализирую {symbol} {tf_key}м...",
                           chat_id=call.message.chat.id, message_id=call.message.message_id)
     run_analysis(call.message.chat.id, call.message.message_id, symbol, tf_key, tf)
 
+# ============================================================
+# 12. ГЛАВНЫЙ АНАЛИЗ (ГИБРИД C: ДВА ПОРОГА)
+# ============================================================
 def run_analysis(chat_id, msg_id, symbol, tf_key, tf):
     try:
         all_tfs = get_all_tfs(symbol)
@@ -465,7 +468,12 @@ def run_analysis(chat_id, msg_id, symbol, tf_key, tf):
         tr_closes = [float(c["close"]) for c in trend]
         
         price = t_closes[-1]
-        rsi_v = rsi(t_closes, 7 if int(tf_key) <= 3 else 14)
+        current_high = t_highs[-1]
+        current_low = t_lows[-1]
+        
+        # Индикаторы
+        rsi_period = 7 if int(tf_key) <= 3 else 14
+        rsi_v = rsi(t_closes, rsi_period)
         bb_v = bollinger(t_closes, 20, 2.0)
         stoch_v = stoch(t_highs, t_lows, t_closes, 5 if int(tf_key) <= 3 else 14)
         atr_v = atr(t_highs, t_lows, t_closes, 14)
@@ -473,71 +481,166 @@ def run_analysis(chat_id, msg_id, symbol, tf_key, tf):
         ema50 = ema(tr_closes, 50)
         trend_dir = trend_direction(tr_closes)
         
+        # === PYTHON-СТРАЖ: Свип ликвидности ===
+        recent_high = max(t_highs[-6:-1]) if len(t_highs) > 5 else current_high
+        recent_low = min(t_lows[-6:-1]) if len(t_lows) > 5 else current_low
+        
+        bearish_sweep = (current_high > recent_high) and (price < recent_high)
+        bullish_sweep = (current_low < recent_low) and (price > recent_low)
+        
+        # === PYTHON-СТРАЖ: Confluence Score ===
+        score = 0
+        reasons = []
+        
+        # 1. Чёткий тренд M15 (+1)
+        if trend_dir in ["восходящий", "нисходящий"]:
+            score += 1
+            reasons.append(f"📉 Тренд {trend_tf}: {trend_dir}")
+        
+        # 2. Свип ликвидности (+2)
+        if bearish_sweep:
+            score += 2
+            reasons.append("🐻 Медвежий свип ликвидности")
+        elif bullish_sweep:
+            score += 2
+            reasons.append("🐂 Бычий свип ликвидности")
+        
+        # 3. Экстремум Bollinger (+1)
+        if bb_v["pos"] in ["above_upper", "below_lower"]:
+            score += 1
+            reasons.append(f"📊 Цена за границей BB ({bb_v['pos']})")
+        
+        # 4. Экстремум RSI/Stoch (+1)
+        if rsi_v > 70 or rsi_v < 30 or stoch_v > 80 or stoch_v < 20:
+            score += 1
+            reasons.append(f"📈 RSI {rsi_v:.0f} / Stoch {stoch_v:.0f} в экстремуме")
+        
+        # === ГИБРИД C: ДВА ПОРОГА ===
+        
+        # ПОРОГ 1: Score 0-1 → WAIT без ИИ (мусор)
+        if score <= 1:
+            header = (
+                f"{symbol} | {tf_key}м | {datetime.now().strftime('%H:%M:%S')} | "
+                f"{'CRYPTO' if is_crypto_symbol(symbol) else 'REAL'}\n"
+                f"⛔ WAIT — недостаточно факторов ({score}/5)\n\n"
+                f"Что есть:\n"
+            )
+            if reasons:
+                header += "\n".join(f"• {r}" for r in reasons)
+            else:
+                header += "• Нет явных сигналов"
+            
+            bot.edit_message_text(header, chat_id=chat_id, message_id=msg_id, 
+                                 reply_markup=kb_inline_main())
+            return  # ИИ НЕ ВЫЗЫВАЕМ
+        
+        # ПОРОГ 2: Score 2+ → зовём ИИ с подсказкой
         live = {
             "symbol": symbol, "signal_tf": int(tf_key), "price": price,
             "trigger_tf": trigger_tf, "trend_tf": trend_tf,
-            "trend_direction": trend_dir, "ema21_trend": round(ema21, 5),
-            "ema50_trend": round(ema50, 5), "rsi_trigger": round(rsi_v, 2),
-            "stochastic_trigger": round(stoch_v, 2), "bollinger_position": bb_v["pos"],
-            "atr_14": round(atr_v, 5), "time": datetime.now().strftime("%H:%M:%S"),
-            "expiry": tf["exp"], "is_crypto": is_crypto_symbol(symbol)
+            "trend_direction": trend_dir, 
+            "ema21_trend": round(ema21, 5), "ema50_trend": round(ema50, 5), 
+            "rsi_current": round(rsi_v, 2), "stochastic_current": round(stoch_v, 2), 
+            "bollinger_position": bb_v["pos"], "atr_14": round(atr_v, 5), 
+            "time": datetime.now().strftime("%H:%M:%S"), "expiry": tf["exp"], 
+            "is_crypto": is_crypto_symbol(symbol),
+            "bearish_liquidity_sweep": bearish_sweep, 
+            "bullish_liquidity_sweep": bullish_sweep
         }
         
         base = REAL_BASE if not is_crypto_symbol(symbol) else OTC_BASE
         base_text = json.dumps(base[:10], ensure_ascii=False)[:2500]
         
+        reasons_text = ', '.join(reasons) if reasons else 'Нет явных сигналов'
+        
         prompt = f"""{MASTER_PROMPT}
 
-LIVE ({symbol}, сигнал на {tf_key} мин):
+PYTHON УЖЕ ПОСЧИТАЛ ДЛЯ ТЕБЯ:
+- Confluence Score: {score}/5
+- Факты: {reasons_text}
+- Свип ликвидности: bearish={bearish_sweep}, bullish={bullish_sweep}
+- Тренд {trend_tf}: {trend_dir}
+- RSI: {rsi_v:.1f}, Stoch: {stoch_v:.1f}
+- BB: {bb_v['pos']}
+
+ТВОЯ ЗАДАЧА:
+1. Если Score = 2 → будь осторожен, ищи редкий паттерн (Микро-М/W, Харами)
+2. Если Score >= 3 → определи направление (CALL/PUT) и назови конкретный паттерн из БАЗЫ ЗНАНИЙ
+3. Если ты НЕ согласен с Python (видишь что-то особенное) → объясни почему
+4. Дай краткое объяснение логики
+
+LIVE ДАННЫЕ ({symbol}, сигнал на {tf_key} мин):
 {json.dumps(live, ensure_ascii=False, indent=2)}
 
-БАЗА:
+БАЗА ЗНАНИЙ (используй эти правила):
 {base_text}
 
-ЗАДАЧА: CALL/PUT/WAIT на {tf['exp']} мин.
-Учитывай тренд {trend_tf}={trend_dir}.
-Верни по формату из master_prompt. Кратко!
+Верни JSON: {{"direction": "CALL/PUT/WAIT", "confidence": 55-75, "pattern": "название паттерна из базы или 'нет паттерна'", "reason": "краткое объяснение"}}
 """
         text = ask_gemini(prompt)
+        
+        # === ФОРМАТИРОВАНИЕ ОТВЕТА ===
+        sweep_text = "🐻 Медвежий" if bearish_sweep else ("🐂 Бычий" if bullish_sweep else "Нет")
         
         header = (
             f"{symbol} | {tf_key}м | {live['time']} | {'CRYPTO' if live['is_crypto'] else 'REAL'}\n"
             f"Цена: {price} | Тренд {trend_tf}: {trend_dir}\n"
             f"EMA21/50: {ema21:.5f}/{ema50:.5f} | RSI: {rsi_v:.1f} Stoch: {stoch_v:.1f}\n"
-            f"BB: {bb_v['pos']} ATR: {atr_v:.5f} | Экспирация: {tf['exp']}м\n\n"
+            f"BB: {bb_v['pos']} ATR: {atr_v:.5f} | Экспирация: {tf['exp']}м\n"
+            f"📊 Python Score: {score}/5 | Свип: {sweep_text}\n\n"
         )
         
-        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
-        bot.edit_message_text(header + text, chat_id=chat_id, message_id=msg_id, reply_markup=kb_inline_main())
+        bot.edit_message_text(header + text, chat_id=chat_id, message_id=msg_id, 
+                             reply_markup=kb_inline_main())
         
     except Exception as e:
         print(f"[ERROR] {symbol}: {e}", flush=True)
-        import traceback
         traceback.print_exc()
-        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
-        bot.edit_message_text(f"Ошибка: {e}", chat_id=chat_id, message_id=msg_id, reply_markup=kb_inline_main())
+        bot.edit_message_text(f"Ошибка: {e}", chat_id=chat_id, message_id=msg_id, 
+                             reply_markup=kb_inline_main())
 
+# ============================================================
+# 13. PHOTO РЕЖИМ (ВСЕГДА ИИ)
+# ============================================================
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
     mode = user_photo_mode.get(m.chat.id, 'REAL')
-    loading = bot.send_message(m.chat.id, f"Анализирую ({mode})...")
+    loading = bot.send_message(m.chat.id, f"⏳ Анализирую скрин ({mode})...")
     try:
         fi = bot.get_file(m.photo[-1].file_id)
         img = bot.download_file(fi.file_path)
         base = OTC_BASE if mode == 'OTC' else REAL_BASE
         base_text = json.dumps(base[:10], ensure_ascii=False)[:2500]
-        prompt = f"{MASTER_PROMPT}\nРежим: {mode}\nБАЗА:\n{base_text}\n\nЗадача: анализ скриншота. Кратко!"
+        
+        prompt = f"""{MASTER_PROMPT}
+
+Режим: {mode}
+
+БАЗА ЗНАНИЙ:
+{base_text}
+
+ЗАДАЧА: Проанализируй скриншот графика и дай сигнал для бинарных опционов.
+Назови конкретный паттерн из БАЗЫ ЗНАНИЙ (BOF, TST, Молот, Поглощение и т.д.).
+Уверенность 55-75%.
+
+Верни JSON: {{"direction": "CALL/PUT/WAIT", "confidence": 55-75, "pattern": "название паттерна", "reason": "краткое объяснение"}}
+"""
         text = ask_gemini(prompt, image_bytes=img)
-        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
-        bot.edit_message_text(text, chat_id=m.chat.id, message_id=loading.message_id, reply_markup=kb_inline_main())
+        bot.edit_message_text(text, chat_id=m.chat.id, message_id=loading.message_id, 
+                             reply_markup=kb_inline_main())
     except Exception as e:
-        # ИСПРАВЛЕНО: используем kb_inline_main() вместо kb_main()
-        bot.edit_message_text(f"Ошибка фото: {e}", chat_id=m.chat.id, message_id=loading.message_id, reply_markup=kb_inline_main())
+        print(f"[ERROR] Photo: {e}", flush=True)
+        bot.edit_message_text(f"Ошибка фото: {e}", chat_id=m.chat.id, message_id=loading.message_id,
+                             reply_markup=kb_inline_main())
 
 # ============================================================
-# 10. ЗАПУСК
+# 14. ЗАПУСК
 # ============================================================
 if __name__ == "__main__":
-    print("[START] GorodTradeBot v7.9 Fixed", flush=True)
+    print("[START] GorodTradeBot v8.1 Hybrid C", flush=True)
     print(f"[INFO] Forex open: {is_forex_open()}", flush=True)
+    print(f"[INFO] Пар: {len(PAIRS)}, ТФ: {len(TIMEFRAMES)}", flush=True)
+    print(f"[INFO] OTC база: {len(OTC_BASE)} индикаторов", flush=True)
+    print(f"[INFO] REAL база: {len(REAL_BASE)} индикаторов", flush=True)
+    print(f"[INFO] Гибрид C: Score 0-1 → WAIT без ИИ, Score 2+ → ИИ с подсказкой", flush=True)
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
